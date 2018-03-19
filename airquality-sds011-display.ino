@@ -6,15 +6,40 @@
 const int rs = 12, en = 11, d4 = 5, d5 = 4, d6 = 3, d7 = 2;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
-int pinRX = 6;
-int pinTX = 7;
-float pm10,pm25;
-int error;
+byte upArrow[8] = {
+    B00000,
+    B00100,
+    B01110,
+    B10101,
+    B00100,
+    B00100,
+    B00000,
+};
+
+byte downArrow[8] = {
+    B00000,
+    B00100,
+    B00100,
+    B10101,
+    B01110,
+    B00100,
+    B00000,
+};
+
+int sds011Rx = 6;
+int sds011Tx = 7;
+int sds011Error;
 
 bool haveData = false;
 int sleepTime = 1000; // Sleep 1 second between measurements
-int averageResultTime = 60; // Get an average result every 60 seconds
-time_t startSeconds = 0;
+
+float pm25CurrentValue, pm25Average1MinValue, pm25Average1MinSum, pm25Average15MinValue, pm25Average15MinSum;
+float pm10CurrentValue, pm10Average1MinValue, pm10Average1MinSum, pm10Average15MinValue, pm10Average15MinSum;
+
+int average1MinDivider, average15MinDivider;
+
+time_t average1MinStart, average15MinStart;
+
 float averagePm10DustDensity = 0;
 float averagePm25DustDensity = 0;
 float finalPm10DustDensity = 0;
@@ -28,16 +53,22 @@ int averagePm25AQI = 0;
 int averagePm25AQISum = 0;
 int averageAQIDivider = 0;
 
-SDS011 mySDS;
+SDS011 sds011;
 
 void setup() {
-  lcd.begin(16, 2);
-  lcd.setCursor(0, 0);
-  mySDS.begin(pinRX, pinTX);
+  lcd.begin(16,2);
+  lcd.createChar(0, upArrow);
+  lcd.createChar(1, downArrow);
+  lcd.setCursor(0,0);
+  sds011.begin(sds011Rx, sds011Tx);
   
   Serial.begin(9600);
   Serial.println("Starting SDS011...");
+  
   lcd.print("Starting...");
+
+  average1MinStart = now();
+  average15MinStart = now();
 }
 
 float AQI(float I_high, float I_low, float C_high, float C_low, float C) {
@@ -45,91 +76,100 @@ float AQI(float I_high, float I_low, float C_high, float C_low, float C) {
 }
 
 float getAverageDustDensity() {
-    if (startSeconds == 0) {
-        startSeconds = now();
-    }
-    mySDS.wakeup();
-    error = mySDS.read(&pm25,&pm10);
-    if (!error) {
-        averagePm25DustDensity = (averagePm25DustDensity + pm25);
-        Serial.println("PM2.5: " + String(pm25DustDensityToAQI(pm25)) + " (" + String(pm25) + ")");
+    sds011.wakeup();
+    sds011Error = sds011.read(&pm25CurrentValue,&pm10CurrentValue);
+    if (!sds011Error) {
+        pm25Average1MinSum = (pm25Average1MinSum + pm25CurrentValue);
+        pm25Average15MinSum = (pm25Average15MinSum + pm25CurrentValue);
+       
+        pm10Average1MinSum = (pm10Average1MinSum + pm10CurrentValue);
+        pm10Average15MinSum = (pm10Average15MinSum + pm10CurrentValue);
+
+        Serial.println("PM2.5: " + String(pm25DustDensityToAQI(pm25CurrentValue)) + " (" + String(pm25CurrentValue) + ")");
+        Serial.println("PM10:  " + String(pm10DustDensityToAQI(pm10CurrentValue)) + " (" + String(pm10CurrentValue) + ")");
         
-        averagePm10DustDensity = (averagePm10DustDensity + pm10);
-        Serial.println("PM10:  " + String(pm10DustDensityToAQI(pm10)) + " (" + String(pm10) + ")");
-        
-        divider++;
+        average1MinDivider++;
+        average15MinDivider++;
 
         // If there is no data, print the first values
         if (haveData == false) {
-            lcd.setCursor(0, 0);
-            lcd.clear();
-            lcd.print("PM2.5: " + String((int)round(pm25DustDensityToAQI(pm25))));
-            lcd.setCursor(0, 1);
-            lcd.print("PM10:  " + String((int)round(pm10DustDensityToAQI(pm10))));
+            // Set the average to current value to show initial values on LCD
+            pm25Average1MinValue = pm25CurrentValue;
+            pm10Average1MinValue = pm10CurrentValue;
+            updateLCD();
 
             haveData = true;
         }
     }
-    
-    if ((startSeconds != 0) && (now() >= (startSeconds + averageResultTime))) {
-        finalPm25DustDensity = (averagePm25DustDensity / divider);
-        finalPm10DustDensity = (averagePm10DustDensity / divider);
 
-        averagePm25AQISum = (averagePm25AQISum + (int)round(pm25DustDensityToAQI(pm25)));
-        averagePm10AQISum = (averagePm25AQISum + (int)round(pm10DustDensityToAQI(pm10)));
-        averageAQIDivider++;
-        if (averageAQIDivider == averageOverAQIValues) {
-            averagePm25AQI = (averagePm25AQISum / averageAQIDivider);
-            averagePm10AQI = (averagePm10AQISum / averageAQIDivider);
+    // Calculate and show 1 minute averages;
+    if (now() >= (average1MinStart + 60)) {
+        pm25Average1MinValue = (pm25Average1MinSum / average1MinDivider);
+        pm10Average1MinValue = (pm10Average1MinSum / average1MinDivider);
 
-            averagePm25AQISum = 0;
-            averagePm10AQISum = 0;
-            averageAQIDivider = 0;
-        }
+        Serial.println("Average 1 min PM2.5: " + String(pm25DustDensityToAQI(pm25Average1MinValue)) + " (" + String(pm25Average1MinValue) + ")");
+        Serial.println("Average 1 min PM10:  " + String(pm10DustDensityToAQI(pm10Average1MinValue)) + " (" + String(pm10Average1MinValue) + ")");
 
-        Serial.println("Average PM2.5: " + String(pm25DustDensityToAQI(finalPm25DustDensity)) + " (" + String(finalPm25DustDensity) + ")");
-        lcd.setCursor(0,0);
-        lcd.clear();
-        lcd.print("PM2.5: " + String((int)round(pm25DustDensityToAQI(finalPm25DustDensity))));
-        lcd.setCursor(15,0);
-        lcd.print(getPm25AQIAverageSign());
-
-        Serial.println("Average PM10:  " + String(pm10DustDensityToAQI(finalPm10DustDensity)) + " (" + String(finalPm10DustDensity) + ")");
-        lcd.setCursor(0,1);
-        lcd.print("PM10:  " + String((int)round(pm10DustDensityToAQI(finalPm10DustDensity))));
-        lcd.setCursor(15,1);
-        lcd.print(getPm10AQIAverageSign());
+        updateLCD();
         
-        startSeconds = now();
-        averagePm25DustDensity = 0;
-        averagePm10DustDensity = 0;
-        finalPm25DustDensity = 0;
-        averagePm10DustDensity = 0;
-        divider = 0;
+        average1MinStart = now();
+        pm25Average1MinSum = 0;
+        pm10Average1MinSum = 0;
+        average1MinDivider = 0;
+    }
+
+    // Calculate 15 minute averages;
+    if (now() >= (average15MinStart + 900)) {
+        pm25Average15MinValue = (pm25Average15MinSum / average15MinDivider);
+        pm10Average15MinValue = (pm10Average15MinSum / average15MinDivider);
+
+        Serial.println("Average 15 min PM2.5: " + String(pm25DustDensityToAQI(pm25Average15MinValue)) + " (" + String(pm25Average15MinValue) + ")");
+        Serial.println("Average 15 min PM10:  " + String(pm10DustDensityToAQI(pm10Average15MinValue)) + " (" + String(pm10Average15MinValue) + ")");
+
+        updateLCD();
+        
+        average15MinStart = now();
+        pm25Average15MinSum = 0;
+        pm10Average15MinSum = 0;
+        average15MinDivider = 0;
     }
 }
 
-String getPm10AQIAverageSign() {
-    if ((int)pm10DustDensityToAQI(finalPm10DustDensity) < averagePm10AQI) {
-        return "-"; 
+void printPm10AQIAverageSign() {
+    lcd.setCursor(15,1);
+    if (!pm10Average15MinValue) {
+        lcd.print(" ");
+        
+        return;
     }
-    else if ((int)pm10DustDensityToAQI(finalPm10DustDensity) == averagePm10AQI) {
-        return "|"; 
+    
+    
+    if ((int)pm10DustDensityToAQI(pm10Average1MinValue) < (int)pm10DustDensityToAQI(pm10Average15MinValue)) {
+        lcd.write(byte(1));
+    }
+    else if ((int)pm10DustDensityToAQI(pm10Average1MinValue) > (int)pm10DustDensityToAQI(pm10Average15MinValue)) {
+        lcd.write(byte(0));
     }
     else {
-        return "+";
+        lcd.print((char)B01111110);
     }
 }
 
-String getPm25AQIAverageSign() {
-    if ((int)pm25DustDensityToAQI(finalPm25DustDensity) < averagePm25AQI) {
-        return "-"; 
+void printPm25AQIAverageSign() {
+    lcd.setCursor(15,0);
+    if (!pm25Average15MinValue) {
+        lcd.print(" ");
+        return;
     }
-    else if ((int)pm25DustDensityToAQI(finalPm25DustDensity) == averagePm25AQI) {
-        return "|"; 
+    
+    if ((int)pm25DustDensityToAQI(pm25Average1MinValue) < (int)pm25DustDensityToAQI(pm25Average15MinValue)) {
+        lcd.write(byte(1));
+    }
+    else if ((int)pm25DustDensityToAQI(pm25Average1MinValue) > (int)pm25DustDensityToAQI(pm25Average15MinValue)) {
+         lcd.write(byte(0));
     }
     else {
-        return "+";
+        lcd.print((char)B01111110);
     }
 }
 
@@ -163,8 +203,21 @@ float pm25DustDensityToAQI(float density) {
     else {return 1001;}
 }
 
+void updateLCD() {
+    lcd.clear();
+    
+    lcd.setCursor(0,0);
+    lcd.print("PM2.5: " + String((int)round(pm25DustDensityToAQI(pm25Average1MinValue))));
+    printPm25AQIAverageSign();
+    
+    lcd.setCursor(0,1);
+    lcd.print(" PM10: " + String((int)round(pm10DustDensityToAQI(pm10Average1MinValue))));
+    lcd.setCursor(15,1);
+    printPm10AQIAverageSign();
+}
+
 void loop() {
     getAverageDustDensity();
-    mySDS.sleep();
+    sds011.sleep();
     delay(sleepTime); 
 }
