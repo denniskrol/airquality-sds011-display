@@ -26,8 +26,8 @@ byte downArrow[8] = {
     B00000,
 };
 
-int sds011Rx = 6;
-int sds011Tx = 7;
+int sds011Rx = 7;
+int sds011Tx = 6;
 int sds011Error;
 
 bool haveData = false;
